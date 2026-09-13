@@ -2284,7 +2284,13 @@ static uint8_t reset_server(const void *cmd, uint16_t cmd_len, void *rsp,
 		}
 	}
 
-	net_buf_reset(server_buf);
+	net_buf_unref(server_buf);
+	server_buf = net_buf_alloc(&server_pool, K_NO_WAIT);
+	if (!server_buf) {
+		server_reset_failed = true;
+		return BTP_STATUS_FAILED;
+	}
+	net_buf_reserve(server_buf, SERVER_BUF_SIZE);
 	memset(server_svcs, 0, sizeof(server_svcs));
 	memset(server_db, 0, sizeof(server_db));
 	attr_count = 0U;
