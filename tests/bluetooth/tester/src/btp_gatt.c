@@ -78,6 +78,7 @@ static uint8_t attr_count;
 static uint8_t svc_attr_count;
 static uint8_t svc_count;
 static bool ccc_added;
+static bool server_reset_failed;
 
 /*
  * gatt_buf - cache used by a gatt client (to cache data read/discovered)
@@ -257,7 +258,8 @@ static uint8_t add_service(const void *cmd, uint16_t cmd_len,
 	struct bt_uuid_any uuid;
 	size_t uuid_size;
 
-	if ((cmd_len < sizeof(*cp)) ||
+	if (server_reset_failed ||
+	    (cmd_len < sizeof(*cp)) ||
 	    (cmd_len != sizeof(*cp) + cp->uuid_length)) {
 		return BTP_STATUS_FAILED;
 	}
@@ -466,7 +468,8 @@ static uint8_t add_characteristic(const void *cmd, uint16_t cmd_len,
 	struct add_characteristic cmd_data;
 	struct bt_uuid_any uuid;
 
-	if ((cmd_len < sizeof(*cp)) ||
+	if (server_reset_failed ||
+	    (cmd_len < sizeof(*cp)) ||
 	    (cmd_len != sizeof(*cp) + cp->uuid_length)) {
 		return BTP_STATUS_FAILED;
 	}
@@ -656,7 +659,8 @@ static uint8_t add_descriptor(const void *cmd, uint16_t cmd_len,
 	struct bt_gatt_attr *chrc;
 	struct bt_uuid_any uuid;
 
-	if ((cmd_len < sizeof(*cp)) ||
+	if (server_reset_failed ||
+	    (cmd_len < sizeof(*cp)) ||
 	    (cmd_len != sizeof(*cp) + cp->uuid_length)) {
 		return BTP_STATUS_FAILED;
 	}
@@ -953,6 +957,10 @@ static uint8_t start_server(const void *cmd, uint16_t cmd_len,
 			    void *rsp, uint16_t *rsp_len)
 {
 	struct btp_gatt_start_server_rp *rp = rsp;
+
+	if (server_reset_failed) {
+		return BTP_STATUS_FAILED;
+	}
 
 	/* Register last defined service */
 	if (svc_attr_count) {
@@ -2243,6 +2251,51 @@ static uint8_t get_handle_from_uuid(const void *cmd, uint16_t cmd_len, void *rsp
 	return BTP_STATUS_FAILED;
 }
 
+static void reset_server_conn_check(struct bt_conn *conn, void *user_data)
+{
+	bool *connected = user_data;
+
+	ARG_UNUSED(conn);
+	*connected = true;
+}
+
+static uint8_t reset_server(const void *cmd, uint16_t cmd_len, void *rsp,
+					   uint16_t *rsp_len)
+{
+	bool connected = false;
+	int err;
+
+	bt_conn_foreach(BT_CONN_TYPE_LE, reset_server_conn_check, &connected);
+	if (connected || !server_buf || server_reset_failed) {
+		return BTP_STATUS_FAILED;
+	}
+
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
+	for (int i = (int)svc_count - 1; i >= 0; i--) {
+		err = bt_gatt_service_unregister(&server_svcs[i]);
+		if (err < 0 && err != -ENOENT) {
+			LOG_ERR("Failed to reset service [%d]: %d", i, err);
+			server_reset_failed = true;
+			return BTP_STATUS_FAILED;
+		}
+	}
+
+	net_buf_simple_reset(server_buf);
+	memset(server_svcs, 0, sizeof(server_svcs));
+	memset(server_db, 0, sizeof(server_db));
+	attr_count = 0U;
+	svc_attr_count = 0U;
+	svc_count = 0U;
+	ccc_added = false;
+	server_reset_failed = false;
+
+	return BTP_STATUS_SUCCESS;
+}
+
 static uint8_t remove_by_handle_from_db(const void *cmd, uint16_t cmd_len, void *rsp,
 						uint16_t *rsp_len)
 {
@@ -2578,6 +2631,11 @@ static const struct btp_handler handlers[] = {
 		.opcode = BTP_GATT_ADD_INCLUDED_SERVICE,
 		.expect_len = sizeof(struct btp_gatt_add_included_service_cmd),
 		.func = add_included,
+	},
+	{
+		.opcode = BTP_GATT_RESET_SERVER,
+		.expect_len = 0,
+		.func = reset_server,
 	},
 	{
 		.opcode = BTP_GATT_SET_VALUE,
