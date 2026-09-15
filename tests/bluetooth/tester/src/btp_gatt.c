@@ -159,7 +159,7 @@ static void gatt_buf_clear(void)
 static struct bt_gatt_attr *gatt_db_add(const struct bt_gatt_attr *pattern,
 					size_t user_data_len)
 {
-	static struct bt_gatt_attr *attr = server_db;
+	struct bt_gatt_attr *attr;
 	size_t uuid_size;
 
 	switch (pattern->uuid->type) {
@@ -175,9 +175,11 @@ static struct bt_gatt_attr *gatt_db_add(const struct bt_gatt_attr *pattern,
 	}
 
 	/* Return NULL if database is full */
-	if (attr == &server_db[SERVER_MAX_ATTRIBUTES - 1]) {
+	if (attr_count >= SERVER_MAX_ATTRIBUTES - 1U) {
 		return NULL;
 	}
+
+	attr = &server_db[attr_count];
 
 	/* First attribute in db must be service */
 	if (!svc_count) {
@@ -200,7 +202,7 @@ static struct bt_gatt_attr *gatt_db_add(const struct bt_gatt_attr *pattern,
 	attr_count++;
 	svc_attr_count++;
 
-	return attr++;
+	return attr;
 }
 
 /* Convert UUID from BTP command to bt_uuid */
@@ -838,6 +840,7 @@ static uint8_t alloc_value(struct bt_gatt_attr *attr, struct set_value *data)
 {
 	struct gatt_value *value;
 	struct bt_conn *conn = NULL;
+	uint16_t required = ROUND_UP(data->len, 4);
 	uint8_t ccc_value;
 	int err = 0;
 	int i;
@@ -853,15 +856,32 @@ static uint8_t alloc_value(struct bt_gatt_attr *attr, struct set_value *data)
 	}
 
 	value = attr->user_data;
+	if (!value) {
+		LOG_ERR("GATT value has no storage: handle 0x%04x", attr->handle);
+		return BTP_STATUS_FAILED;
+	}
 
 	/* Check if attribute value has been already set */
 	if (!value->len) {
+		if (!server_buf || net_buf_headroom(server_buf) < required) {
+			LOG_ERR("GATT value buffer exhausted: handle 0x%04x len %u headroom %u",
+				attr->handle, data->len,
+				server_buf ? net_buf_headroom(server_buf) : 0U);
+			return BTP_STATUS_FAILED;
+		}
 		value->data = server_buf_push(data->len);
+		if (!value->data) {
+			LOG_ERR("GATT value allocation failed: handle 0x%04x len %u",
+				attr->handle, data->len);
+			return BTP_STATUS_FAILED;
+		}
 		value->len = data->len;
 	}
 
-	/* Fail if value length doesn't match  */
-	if (value->len != data->len) {
+	/* Fail if value length doesn't match */
+	if (value->len != data->len || !value->data) {
+		LOG_ERR("GATT value mismatch: handle 0x%04x stored %u requested %u",
+			attr->handle, value->len, data->len);
 		return BTP_STATUS_FAILED;
 	}
 
